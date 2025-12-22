@@ -60,23 +60,17 @@ def listar_arquivos_cnab():
 
 
 def parse_valor(valor_str):
-    """Converte valor CNAB (centavos) para formato R$"""
+    """Converte valor CNAB (centavos) para número float"""
     try:
         valor_str = valor_str.strip()
-        if not valor_str or not valor_str.isdigit():
-            return "R$ 0,00"
-        valor = int(valor_str) / 100
-        return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return "R$ 0,00"
-
-
-def valor_para_numero(valor_str):
-    """Converte valor formatado 'R$ X.XXX,XX' de volta para número"""
-    try:
-        # Remove 'R$', espaços, pontos e substitui vírgula por ponto
-        numero_str = valor_str.replace('R$', '').replace(' ', '').replace('.', '').replace(',', '.')
-        return float(numero_str)
+        if not valor_str:
+            return 0.0
+        # Limpar caracteres não numéricos e converter
+        valor_limpo = re.sub(r'\D', '', valor_str)
+        if not valor_limpo or valor_limpo == '0':
+            return 0.0
+        valor = int(valor_limpo) / 100.0
+        return valor
     except:
         return 0.0
 
@@ -87,12 +81,15 @@ def numero_para_valor(numero):
 
 
 def formatar_cpf_cnpj(doc):
-    """Formata CPF ou CNPJ"""
+    """Formata CPF (sempre 11 dígitos)"""
     doc = re.sub(r'\D', '', doc)
+    # Pegar apenas os últimos 11 dígitos se tiver mais
+    if len(doc) > 11:
+        doc = doc[-11:]
+    # Garantir que tem 11 dígitos, preenchendo com zeros à esquerda se necessário
+    doc = doc.zfill(11)
     if len(doc) == 11:
         return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
-    elif len(doc) == 14:
-        return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
     return doc
 
 
@@ -128,18 +125,17 @@ def parse_cnab_linha(linha):
     # ID do título com parcela (posições 108-122) - formato: 2104757146-027
     id_titulo_parcela = linha[108:122].strip()
     
-    # Extrair parcela do ID (após o hífen)
-    parcela = ""
+    # Extrair apenas o número do meio (remover prefixo 210 e sufixo -027)
     id_titulo = id_titulo_parcela
-    if '-' in id_titulo_parcela:
-        partes = id_titulo_parcela.split('-')
-        if len(partes) >= 2:
-            id_titulo = partes[0]
-            parcela_str = partes[1].lstrip('0')
-            if parcela_str:
-                parcela = parcela_str
-            else:
-                parcela = "0"
+    
+    # Remover prefixo "210" se existir
+    if id_titulo.startswith('210'):
+        id_titulo = id_titulo[3:]
+    
+    # Remover sufixo após hífen (ex: -027)
+    if '-' in id_titulo:
+        partes = id_titulo.split('-')
+        id_titulo = partes[0]
     
     # Nome do cliente (posições 234-274)
     nome = linha[234:274].strip()
@@ -148,9 +144,13 @@ def parse_cnab_linha(linha):
     cpf_cnpj_raw = linha[220:234].strip()
     cpf_cnpj = formatar_cpf_cnpj(cpf_cnpj_raw)
     
-    # Valor (posições 200-207 - 7 dígitos em centavos)
-    valor_raw = linha[200:207].strip()
-    valor = parse_valor(valor_raw)
+    # Valor - buscar padrão: zeros + valor_em_centavos + 457
+    valor = 0.0
+    # Buscar padrão na linha inteira: múltiplos zeros seguidos de dígitos e terminando em 457
+    valor_match = re.search(r'0{5,}(\d+?)457', linha)
+    if valor_match:
+        valor_centavos = valor_match.group(1)
+        valor = int(valor_centavos) / 100.0
     
     # Endereço (posições 274-326)
     endereco = linha[274:326].strip()
@@ -177,9 +177,8 @@ def parse_cnab_linha(linha):
     return {
         'nome': nome,
         'cpf_cnpj': cpf_cnpj,
-        'parcela': parcela,
         'valor': valor,
-        'id_titulo': id_titulo_parcela,
+        'id_titulo': id_titulo,  # Usar ID limpo (sem prefixo 210 e sem sufixo -027)
         'endereco': endereco,
         'cep': cep,
         'email': email,
@@ -222,18 +221,18 @@ def processar_arquivo(caminho_cnab):
         print(f"⚠️  Nenhum registro encontrado em: {os.path.basename(caminho_cnab)}")
         return False
     
-    # Agrupar registros por cliente (usando CPF/CNPJ como chave única)
-    clientes_agrupados = {}
+    # Agrupar registros por operação (usando id_titulo como chave única)
+    operacoes_agrupadas = {}
     for reg in registros:
-        chave = reg['cpf_cnpj']  # Usar CPF/CNPJ como identificador único
+        chave = reg['id_titulo']  # Usar número da operação como identificador único
         
-        if chave not in clientes_agrupados:
+        if chave not in operacoes_agrupadas:
             # Primeira ocorrência: criar entrada
-            clientes_agrupados[chave] = {
+            operacoes_agrupadas[chave] = {
                 'nome': reg['nome'],
                 'cpf_cnpj': reg['cpf_cnpj'],
                 'quantidade_parcelas': 1,
-                'valor_total': valor_para_numero(reg['valor']),
+                'valor_total': reg['valor'],  # Já é número float
                 'id_titulo': reg['id_titulo'],
                 'endereco': reg['endereco'],
                 'cep': reg['cep'],
@@ -241,23 +240,23 @@ def processar_arquivo(caminho_cnab):
                 'telefone': reg['telefone']
             }
         else:
-            # Cliente já existe: incrementar parcelas e somar valor
-            clientes_agrupados[chave]['quantidade_parcelas'] += 1
-            clientes_agrupados[chave]['valor_total'] += valor_para_numero(reg['valor'])
+            # Operação já existe: incrementar parcelas e somar valor
+            operacoes_agrupadas[chave]['quantidade_parcelas'] += 1
+            operacoes_agrupadas[chave]['valor_total'] += reg['valor']  # Já é número float
     
     # Converter dicionário de volta para lista
     registros_agrupados = []
-    for cliente in clientes_agrupados.values():
+    for operacao in operacoes_agrupadas.values():
         registros_agrupados.append({
-            'nome': cliente['nome'],
-            'cpf_cnpj': cliente['cpf_cnpj'],
-            'parcelas': str(cliente['quantidade_parcelas']),
-            'valor': numero_para_valor(cliente['valor_total']),
-            'id_titulo': cliente['id_titulo'],
-            'endereco': cliente['endereco'],
-            'cep': cliente['cep'],
-            'email': cliente['email'],
-            'telefone': cliente['telefone']
+            'nome': operacao['nome'],
+            'cpf_cnpj': operacao['cpf_cnpj'],
+            'parcelas': str(operacao['quantidade_parcelas']),
+            'valor': numero_para_valor(operacao['valor_total']),
+            'id_titulo': operacao['id_titulo'],
+            'endereco': operacao['endereco'],
+            'cep': operacao['cep'],
+            'email': operacao['email'],
+            'telefone': operacao['telefone']
         })
     
     # Criar Excel
@@ -266,7 +265,7 @@ def processar_arquivo(caminho_cnab):
     ws.title = "Dados CNAB"
     
     # Cabeçalhos
-    headers = ['Nome Cliente', 'CPF/CNPJ', 'Parcelas', 'Valor Total (Soma)', 'ID Titulo', 'Endereco', 'CEP', 'Email', 'Telefone']
+    headers = ['Nome Cliente', 'CPF/CNPJ', 'Parcelas', 'Valor Total (Soma)', 'Nº da Operação', 'Endereco', 'CEP', 'Email', 'Telefone']
     
     # Estilos
     header_font = Font(bold=True, color="FFFFFF")
