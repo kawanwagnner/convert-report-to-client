@@ -71,6 +71,21 @@ def parse_valor(valor_str):
         return "R$ 0,00"
 
 
+def valor_para_numero(valor_str):
+    """Converte valor formatado 'R$ X.XXX,XX' de volta para número"""
+    try:
+        # Remove 'R$', espaços, pontos e substitui vírgula por ponto
+        numero_str = valor_str.replace('R$', '').replace(' ', '').replace('.', '').replace(',', '.')
+        return float(numero_str)
+    except:
+        return 0.0
+
+
+def numero_para_valor(numero):
+    """Converte número para formato 'R$ X.XXX,XX'"""
+    return f"R$ {numero:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def formatar_cpf_cnpj(doc):
     """Formata CPF ou CNPJ"""
     doc = re.sub(r'\D', '', doc)
@@ -147,10 +162,11 @@ def parse_cnab_linha(linha):
     if cep_match:
         cep = formatar_cep(cep_match.group())
     
-    # Email - buscar padrão de email na região 326-385
+    # Email - buscar padrão de email na região 326-385 (evitar CEP no início)
     email = ""
     email_region = linha[326:385]
-    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email_region)
+    # Garantir que o email comece com letra, não com número
+    email_match = re.search(r'[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email_region)
     if email_match:
         email = email_match.group().lower()
     
@@ -206,13 +222,51 @@ def processar_arquivo(caminho_cnab):
         print(f"⚠️  Nenhum registro encontrado em: {os.path.basename(caminho_cnab)}")
         return False
     
+    # Agrupar registros por cliente (usando CPF/CNPJ como chave única)
+    clientes_agrupados = {}
+    for reg in registros:
+        chave = reg['cpf_cnpj']  # Usar CPF/CNPJ como identificador único
+        
+        if chave not in clientes_agrupados:
+            # Primeira ocorrência: criar entrada
+            clientes_agrupados[chave] = {
+                'nome': reg['nome'],
+                'cpf_cnpj': reg['cpf_cnpj'],
+                'quantidade_parcelas': 1,
+                'valor_total': valor_para_numero(reg['valor']),
+                'id_titulo': reg['id_titulo'],
+                'endereco': reg['endereco'],
+                'cep': reg['cep'],
+                'email': reg['email'],
+                'telefone': reg['telefone']
+            }
+        else:
+            # Cliente já existe: incrementar parcelas e somar valor
+            clientes_agrupados[chave]['quantidade_parcelas'] += 1
+            clientes_agrupados[chave]['valor_total'] += valor_para_numero(reg['valor'])
+    
+    # Converter dicionário de volta para lista
+    registros_agrupados = []
+    for cliente in clientes_agrupados.values():
+        registros_agrupados.append({
+            'nome': cliente['nome'],
+            'cpf_cnpj': cliente['cpf_cnpj'],
+            'parcelas': str(cliente['quantidade_parcelas']),
+            'valor': numero_para_valor(cliente['valor_total']),
+            'id_titulo': cliente['id_titulo'],
+            'endereco': cliente['endereco'],
+            'cep': cliente['cep'],
+            'email': cliente['email'],
+            'telefone': cliente['telefone']
+        })
+    
     # Criar Excel
     wb = Workbook()
     ws = wb.active
     ws.title = "Dados CNAB"
     
     # Cabeçalhos
-    headers = ['Nome Cliente', 'CPF/CNPJ', 'Parcela', 'Valor', 'ID Titulo', 'Endereco', 'CEP', 'Email', 'Telefone']
+    headers = ['Nome Cliente', 'CPF/CNPJ', 'Parcelas', 'Valor Total (Soma)', 'ID Titulo', 'Endereco', 'CEP', 'Email', 'Telefone']
     
     # Estilos
     header_font = Font(bold=True, color="FFFFFF")
@@ -234,11 +288,11 @@ def processar_arquivo(caminho_cnab):
         cell.border = thin_border
     
     # Escrever dados
-    for row_idx, reg in enumerate(registros, 2):
+    for row_idx, reg in enumerate(registros_agrupados, 2):
         valores = [
             reg['nome'],
             reg['cpf_cnpj'],
-            reg['parcela'],
+            reg['parcelas'],
             reg['valor'],
             reg['id_titulo'],
             reg['endereco'],
@@ -261,7 +315,7 @@ def processar_arquivo(caminho_cnab):
     caminho_saida = os.path.join(PASTA_SAIDA, f"{nome_arquivo}.xlsx")
     wb.save(caminho_saida)
     
-    print(f"    ✅ Excel gerado: {nome_arquivo}.xlsx ({len(registros)} registros)")
+    print(f"    ✅ Excel gerado: {nome_arquivo}.xlsx ({len(registros_agrupados)} clientes, {len(registros)} parcelas totais)")
     return True
 
 
